@@ -2,6 +2,7 @@ from fastapi import FastAPI, APIRouter, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+import socketio
 import os
 import logging
 from pathlib import Path
@@ -21,6 +22,14 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
+# Socket.IO setup
+sio = socketio.AsyncServer(
+    async_mode='asgi',
+    cors_allowed_origins='*',
+    logger=True,
+    engineio_logger=False
+)
+
 # Create the main app
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -28,9 +37,10 @@ api_router = APIRouter(prefix="/api")
 # ==================== MODELS ====================
 
 class ProjectStatus(BaseModel):
-    status: str  # creating, testing, ready, deployed, failed
+    status: str
     progress: int = 0
     message: str = ""
+    current_step: str = ""
 
 class Project(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -73,7 +83,7 @@ class Version(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     project_id: str
     message: str
-    changes: Dict[str, Any]  # файлы изменены, добавлены, удалены
+    changes: Dict[str, Any]
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_by: str = "system"
 
@@ -86,8 +96,8 @@ class LogEntry(BaseModel):
     
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     project_id: str
-    agent: str  # generator, tester, deploy, optimizer, docs
-    level: str  # info, warning, error
+    agent: str
+    level: str
     message: str
     details: Optional[Dict[str, Any]] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -102,7 +112,7 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
     
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str  # generator, tester, deploy, optimizer, docs
+    name: str
     prompt_template: str
     model_provider: str = "openai"
     model_name: str = "gpt-4o"
@@ -136,10 +146,30 @@ class TestResult(BaseModel):
     warnings: List[str] = []
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+# ==================== SOCKET.IO EVENTS ====================
+
+@sio.event
+async def connect(sid, environ):
+    print(f"Client connected: {sid}")
+
+@sio.event
+async def disconnect(sid):
+    print(f"Client disconnected: {sid}")
+
+@sio.event
+async def join_project(sid, data):
+    project_id = data.get('project_id')
+    await sio.enter_room(sid, f"project_{project_id}")
+    print(f"Client {sid} joined project {project_id}")
+
+async def emit_to_project(project_id: str, event: str, data: dict):
+    """Отправить событие всем клиентам проекта"""
+    await sio.emit(event, data, room=f"project_{project_id}")
+
 # ==================== HELPER FUNCTIONS ====================
 
 async def create_log(project_id: str, agent: str, level: str, message: str, details: Optional[Dict] = None):
-    """Создать лог запись"""
+    """Создать лог запись и отправить через WebSocket"""
     log = LogEntry(
         project_id=project_id,
         agent=agent,
@@ -150,18 +180,40 @@ async def create_log(project_id: str, agent: str, level: str, message: str, deta
     doc = log.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
     await db.logs.insert_one(doc)
+    
+    # Отправить через WebSocket
+    await emit_to_project(project_id, 'log', {
+        'agent': agent,
+        'level': level,
+        'message': message,
+        'details': details,
+        'timestamp': doc['created_at']
+    })
 
-async def update_project_status(project_id: str, status: str, progress: int, message: str):
-    """Обновить статус проекта"""
+async def update_project_status(project_id: str, status: str, progress: int, message: str, current_step: str = ""):
+    """Обновить статус проекта и отправить через WebSocket"""
     await db.projects.update_one(
         {"id": project_id},
         {"$set": {
             "status.status": status,
             "status.progress": progress,
             "status.message": message,
+            "status.current_step": current_step,
             "updated_at": datetime.now(timezone.utc).isoformat()
         }}
     )
+    
+    # Отправить через WebSocket
+    await emit_to_project(project_id, 'status', {
+        'status': status,
+        'progress': progress,
+        'message': message,
+        'current_step': current_step
+    })
+
+async def emit_file_created(project_id: str, file_data: dict):
+    """Уведомить о создании файла"""
+    await emit_to_project(project_id, 'file_created', file_data)
 
 async def get_llm_chat():
     """Получить LLM chat клиент"""
@@ -224,49 +276,31 @@ AGENT_PROMPTS = {
 {{
   "tests_passed": количество,
   "tests_failed": количество,
-  "errors": ["список ошибок"],
+  "errors": ["список ошибок с указанием файла и строки"],
   "warnings": ["предупреждения"],
   "suggestions": ["рекомендации"]
 }}
 """,
-    "optimizer": """
-Вы - агент оптимизации кода. Ваша задача - улучшить качество кода.
+    "fixer": """
+Вы - агент исправления ошибок. Ваша задача - автоматически исправить найденные ошибки.
 
-Код для оптимизации:
+Файл с ошибкой:
+Путь: {file_path}
+Ошибка: {error}
+
+Текущий код:
 {code}
 
 Ваши задачи:
-1. Найти неэффективные участки
-2. Предложить улучшения
-3. Оптимизировать производительность
-4. Улучшить читаемость
+1. Проанализировать ошибку
+2. Исправить код
+3. Убедиться что исправление не ломает другой функционал
 
 Верните JSON:
 {{
-  "optimized_code": "оптимизированный код",
-  "improvements": ["список улучшений"],
-  "performance_gain": "оценка улучшения"
-}}
-""",
-    "docs": """
-Вы - агент создания документации. Ваша задача - создать README и документацию.
-
-Проект:
-{project_info}
-
-Файлы:
-{files}
-
-Ваши задачи:
-1. Создать README.md
-2. Описать установку
-3. Описать использование
-4. Добавить примеры
-
-Верните JSON:
-{{
-  "readme": "содержимое README.md",
-  "additional_docs": [{{"filename": "имя", "content": "содержимое"}}]
+  "fixed_code": "исправленный код",
+  "explanation": "объяснение что было исправлено",
+  "additional_fixes": ["другие найденные и исправленные проблемы"]
 }}
 """
 }
@@ -275,7 +309,7 @@ AGENT_PROMPTS = {
 
 @api_router.get("/")
 async def root():
-    return {"message": "Emergent Clone API v1.0", "status": "running"}
+    return {"message": "Emergent Clone API v2.0", "status": "running"}
 
 # ========== PROJECTS ==========
 
@@ -288,7 +322,7 @@ async def create_project(input: ProjectCreate):
         name=project_name,
         description="Генерация из промпта...",
         prompt=input.prompt,
-        status=ProjectStatus(status="creating", progress=10, message="Проект создан")
+        status=ProjectStatus(status="creating", progress=5, message="Проект создан", current_step="Инициализация")
     )
     
     doc = project.model_dump()
@@ -297,14 +331,15 @@ async def create_project(input: ProjectCreate):
     doc['status'] = {
         'status': doc['status']['status'],
         'progress': doc['status']['progress'],
-        'message': doc['status']['message']
+        'message': doc['status']['message'],
+        'current_step': doc['status']['current_step']
     }
     
     await db.projects.insert_one(doc)
     await create_log(project.id, "system", "info", "Проект создан", {"prompt": input.prompt})
     
     # Запустить генерацию в фоне
-    asyncio.create_task(generate_project_files(project.id, input.prompt))
+    asyncio.create_task(generate_project_with_details(project.id, input.prompt))
     
     return project
 
@@ -350,7 +385,6 @@ async def delete_project(project_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Проект не найден")
     
-    # Удалить связанные файлы и логи
     await db.files.delete_many({"project_id": project_id})
     await db.logs.delete_many({"project_id": project_id})
     await db.versions.delete_many({"project_id": project_id})
@@ -365,11 +399,10 @@ async def regenerate_project(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Проект не найден")
     
-    await update_project_status(project_id, "creating", 10, "Перегенерация...")
+    await update_project_status(project_id, "creating", 5, "Перегенерация...", "Инициализация")
     await create_log(project_id, "system", "info", "Начата перегенерация проекта")
     
-    # Запустить генерацию в фоне
-    asyncio.create_task(generate_project_files(project_id, project['prompt']))
+    asyncio.create_task(generate_project_with_details(project_id, project['prompt']))
     
     return {"message": "Перегенерация запущена"}
 
@@ -403,8 +436,6 @@ async def create_file(project_id: str, input: FileCreate):
     doc['updated_at'] = doc['updated_at'].isoformat()
     
     await db.files.insert_one(doc)
-    
-    # Обновить счетчик файлов
     await db.projects.update_one(
         {"id": project_id},
         {"$inc": {"files_count": 1}}
@@ -462,7 +493,6 @@ async def delete_file(file_id: str):
     result = await db.files.delete_one({"id": file_id})
     
     if result.deleted_count > 0:
-        # Обновить счетчик файлов
         await db.projects.update_one(
             {"id": file['project_id']},
             {"$inc": {"files_count": -1}}
@@ -500,18 +530,6 @@ async def create_version(project_id: str, input: VersionCreate):
     
     return version
 
-@api_router.post("/projects/{project_id}/versions/{version_id}/rollback")
-async def rollback_version(project_id: str, version_id: str):
-    """Откатить к версии"""
-    version = await db.versions.find_one({"id": version_id, "project_id": project_id}, {"_id": 0})
-    
-    if not version:
-        raise HTTPException(status_code=404, detail="Версия не найдена")
-    
-    await create_log(project_id, "system", "info", f"Откат к версии: {version['message']}")
-    
-    return {"message": "Откат выполнен", "version": version}
-
 # ========== LOGS ==========
 
 @api_router.get("/projects/{project_id}/logs", response_model=List[LogEntry])
@@ -533,7 +551,6 @@ async def get_settings():
     settings = await db.settings.find_one({"id": "settings"}, {"_id": 0})
     
     if not settings:
-        # Создать настройки по умолчанию
         default_settings = Settings()
         doc = default_settings.model_dump()
         doc['updated_at'] = doc['updated_at'].isoformat()
@@ -559,45 +576,15 @@ async def update_settings(input: SettingsUpdate):
     
     return await get_settings()
 
-# ========== AGENTS ==========
-
-@api_router.get("/agents", response_model=List[AgentConfig])
-async def get_agents():
-    """Получить конфигурацию агентов"""
-    agents = await db.agents.find({}, {"_id": 0}).to_list(100)
-    
-    if not agents:
-        # Создать агентов по умолчанию
-        default_agents = [
-            AgentConfig(name="generator", prompt_template=AGENT_PROMPTS["generator"]),
-            AgentConfig(name="tester", prompt_template=AGENT_PROMPTS["tester"]),
-            AgentConfig(name="optimizer", prompt_template=AGENT_PROMPTS["optimizer"]),
-            AgentConfig(name="docs", prompt_template=AGENT_PROMPTS["docs"])
-        ]
-        
-        for agent in default_agents:
-            doc = agent.model_dump()
-            doc['created_at'] = doc['created_at'].isoformat()
-            await db.agents.insert_one(doc)
-        
-        return default_agents
-    
-    for agent in agents:
-        if isinstance(agent['created_at'], str):
-            agent['created_at'] = datetime.fromisoformat(agent['created_at'])
-    
-    return agents
-
 # ========== TESTING ==========
 
 @api_router.post("/projects/{project_id}/test")
 async def test_project(project_id: str):
     """Запустить тестирование проекта"""
-    await update_project_status(project_id, "testing", 50, "Запуск тестов...")
+    await update_project_status(project_id, "testing", 50, "Запуск тестов...", "Тестирование")
     await create_log(project_id, "tester", "info", "Начато тестирование")
     
-    # Запустить тестирование в фоне
-    asyncio.create_task(run_project_tests(project_id))
+    asyncio.create_task(run_project_tests_with_fixes(project_id))
     
     return {"message": "Тестирование запущено"}
 
@@ -611,37 +598,43 @@ async def deploy_project(project_id: str, repo_name: str):
     if not settings or not settings.get('github_token'):
         raise HTTPException(status_code=400, detail="GitHub токен не настроен")
     
-    await update_project_status(project_id, "deploying", 80, "Деплой в GitHub...")
+    await update_project_status(project_id, "deploying", 80, "Деплой в GitHub...", "Деплой")
     await create_log(project_id, "deploy", "info", "Начат деплой в GitHub")
     
-    # Запустить деплой в фоне
     asyncio.create_task(deploy_to_github(project_id, repo_name, settings['github_token']))
     
     return {"message": "Деплой запущен"}
 
 # ==================== BACKGROUND TASKS ====================
 
-async def generate_project_files(project_id: str, prompt: str):
-    """Генерация файлов проекта с помощью AI"""
+async def generate_project_with_details(project_id: str, prompt: str):
+    """Генерация проекта с детальным отображением процесса"""
     try:
-        await update_project_status(project_id, "creating", 20, "Анализ промпта...")
-        await create_log(project_id, "generator", "info", "Начата генерация проекта")
+        # Шаг 1: Анализ промпта
+        await update_project_status(project_id, "creating", 10, "Анализ требований...", "Анализ промпта")
+        await create_log(project_id, "generator", "info", "Начат анализ промпта")
+        await asyncio.sleep(1)
         
-        # Получить LLM клиент
+        # Шаг 2: Подключение к AI
+        await update_project_status(project_id, "creating", 20, "Подключение к AI...", "Инициализация LLM")
+        await create_log(project_id, "generator", "info", "Подключение к AI модели")
+        
         chat = await get_llm_chat()
         
-        # Сформировать промпт для агента
+        # Шаг 3: Генерация структуры
+        await update_project_status(project_id, "creating", 30, "Генерация структуры проекта...", "Планирование")
+        await create_log(project_id, "generator", "info", "AI анализирует требования и планирует структуру")
+        
         agent_prompt = AGENT_PROMPTS["generator"].format(prompt=prompt)
         message = UserMessage(text=agent_prompt)
         
-        await update_project_status(project_id, "creating", 40, "Генерация файлов...")
+        await update_project_status(project_id, "creating", 40, "AI генерирует файлы...", "Генерация кода")
+        await create_log(project_id, "generator", "info", "Запущена генерация кода")
         
-        # Получить ответ от AI
         response = await chat.send_message(message)
         
-        # Парсинг JSON ответа
+        # Парсинг ответа
         try:
-            # Извлечь JSON из ответа
             response_text = response.strip()
             if "```json" in response_text:
                 response_text = response_text.split("```json")[1].split("```")[0]
@@ -649,8 +642,8 @@ async def generate_project_files(project_id: str, prompt: str):
                 response_text = response_text.split("```")[1].split("```")[0]
             
             result = json.loads(response_text)
-        except:
-            # Если парсинг не удался, создать базовый проект
+        except Exception as e:
+            await create_log(project_id, "generator", "warning", f"Не удалось распарсить JSON, использую базовую структуру: {str(e)}")
             result = {
                 "project_name": f"project_{uuid.uuid4().hex[:8]}",
                 "description": prompt,
@@ -662,8 +655,6 @@ async def generate_project_files(project_id: str, prompt: str):
                 "next_steps": ["Реализовать основной функционал"]
             }
         
-        await update_project_status(project_id, "creating", 60, "Сохранение файлов...")
-        
         # Обновить информацию о проекте
         await db.projects.update_one(
             {"id": project_id},
@@ -673,8 +664,14 @@ async def generate_project_files(project_id: str, prompt: str):
             }}
         )
         
-        # Создать файлы
-        for file_data in result.get("files", []):
+        await update_project_status(project_id, "creating", 50, "Создание файлов...", "Сохранение файлов")
+        await create_log(project_id, "generator", "info", f"Создание {len(result.get('files', []))} файлов")
+        
+        # Создать файлы с уведомлениями
+        files_created = 0
+        total_files = len(result.get("files", []))
+        
+        for idx, file_data in enumerate(result.get("files", [])):
             file = FileItem(
                 project_id=project_id,
                 path=file_data.get("path", "unknown.txt"),
@@ -687,101 +684,218 @@ async def generate_project_files(project_id: str, prompt: str):
             doc['updated_at'] = doc['updated_at'].isoformat()
             
             await db.files.insert_one(doc)
+            files_created += 1
+            
+            # Уведомить о создании файла
+            await emit_file_created(project_id, {
+                'id': file.id,
+                'path': file.path,
+                'language': file.language,
+                'size': len(file.content)
+            })
+            
+            progress = 50 + int((idx + 1) / total_files * 30)
+            await update_project_status(
+                project_id, 
+                "creating", 
+                progress, 
+                f"Создан файл {idx + 1}/{total_files}: {file.path}",
+                f"Файл {idx + 1}/{total_files}"
+            )
+            await create_log(project_id, "generator", "info", f"✓ Создан файл: {file.path}")
+            
+            await asyncio.sleep(0.5)  # Небольшая задержка для визуализации
         
         # Обновить счетчик файлов
-        files_count = len(result.get("files", []))
         await db.projects.update_one(
             {"id": project_id},
-            {"$set": {"files_count": files_count}}
+            {"$set": {"files_count": files_created}}
         )
         
-        await update_project_status(project_id, "ready", 100, "Проект готов")
-        await create_log(project_id, "generator", "info", f"Проект создан: {files_count} файлов", {
-            "files_count": files_count,
+        await update_project_status(project_id, "ready", 100, "Проект готов", "Завершено")
+        await create_log(project_id, "generator", "info", f"✓ Проект создан: {files_created} файлов", {
+            "files_count": files_created,
             "technologies": result.get("technologies", [])
         })
         
     except Exception as e:
-        await update_project_status(project_id, "failed", 0, f"Ошибка: {str(e)}")
+        await update_project_status(project_id, "failed", 0, f"Ошибка: {str(e)}", "Ошибка")
         await create_log(project_id, "generator", "error", f"Ошибка генерации: {str(e)}")
 
-async def run_project_tests(project_id: str):
-    """Запуск тестов проекта"""
-    try:
-        await update_project_status(project_id, "testing", 60, "Анализ файлов...")
+async def run_project_tests_with_fixes(project_id: str):
+    """Запуск тестов с автоматическим исправлением ошибок"""
+    max_iterations = 3
+    iteration = 0
+    
+    while iteration < max_iterations:
+        iteration += 1
         
-        # Получить файлы проекта
-        files = await db.files.find({"project_id": project_id}, {"_id": 0}).to_list(1000)
-        
-        if not files:
-            await update_project_status(project_id, "ready", 100, "Нет файлов для тестирования")
-            return
-        
-        await update_project_status(project_id, "testing", 80, "Выполнение тестов...")
-        
-        # Получить LLM клиент
-        chat = await get_llm_chat()
-        
-        # Подготовить данные о файлах
-        files_info = "\n".join([f"Файл: {f['path']}\nЯзык: {f['language']}\nСодержимое:\n{f['content'][:500]}...\n" for f in files[:5]])
-        
-        # Сформировать промпт для тестирования
-        agent_prompt = AGENT_PROMPTS["tester"].format(files=files_info)
-        message = UserMessage(text=agent_prompt)
-        
-        # Получить результаты тестирования
-        response = await chat.send_message(message)
-        
-        # Парсинг результатов
         try:
-            response_text = response.strip()
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0]
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0]
+            await update_project_status(project_id, "testing", 50 + iteration * 10, f"Тестирование (попытка {iteration})...", "Анализ кода")
+            await create_log(project_id, "tester", "info", f"Запуск тестирования (попытка {iteration}/{max_iterations})")
             
-            result = json.loads(response_text)
-        except:
-            result = {
-                "tests_passed": len(files),
-                "tests_failed": 0,
-                "errors": [],
-                "warnings": ["Автоматическое тестирование выполнено"]
-            }
-        
-        # Сохранить результаты
-        test_result = TestResult(
-            project_id=project_id,
-            tests_passed=result.get("tests_passed", 0),
-            tests_failed=result.get("tests_failed", 0),
-            errors=result.get("errors", []),
-            warnings=result.get("warnings", [])
-        )
-        
-        doc = test_result.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        await db.test_results.insert_one(doc)
-        
-        if result.get("tests_failed", 0) > 0:
-            await update_project_status(project_id, "ready", 100, f"Тесты завершены с ошибками: {result['tests_failed']}")
-            await create_log(project_id, "tester", "warning", f"Найдены ошибки: {result['tests_failed']}", result)
-        else:
-            await update_project_status(project_id, "ready", 100, "Все тесты пройдены")
-            await create_log(project_id, "tester", "info", "Тестирование завершено успешно", result)
-        
-    except Exception as e:
-        await update_project_status(project_id, "ready", 100, f"Ошибка тестирования: {str(e)}")
-        await create_log(project_id, "tester", "error", f"Ошибка: {str(e)}")
+            # Получить файлы проекта
+            files = await db.files.find({"project_id": project_id}, {"_id": 0}).to_list(1000)
+            
+            if not files:
+                await update_project_status(project_id, "ready", 100, "Нет файлов для тестирования", "Завершено")
+                return
+            
+            await create_log(project_id, "tester", "info", f"Анализ {len(files)} файлов")
+            
+            # Получить LLM клиент
+            chat = await get_llm_chat()
+            
+            # Подготовить данные о файлах
+            files_info = "\n\n".join([f"Файл: {f['path']}\nЯзык: {f['language']}\nСодержимое:\n{f['content'][:1000]}...\n" for f in files[:5]])
+            
+            # Сформировать промпт для тестирования
+            agent_prompt = AGENT_PROMPTS["tester"].format(files=files_info)
+            message = UserMessage(text=agent_prompt)
+            
+            await update_project_status(project_id, "testing", 60 + iteration * 10, "AI проверяет код на ошибки...", "Проверка")
+            
+            # Получить результаты тестирования
+            response = await chat.send_message(message)
+            
+            # Парсинг результатов
+            try:
+                response_text = response.strip()
+                if "```json" in response_text:
+                    response_text = response_text.split("```json")[1].split("```")[0]
+                elif "```" in response_text:
+                    response_text = response_text.split("```")[1].split("```")[0]
+                
+                result = json.loads(response_text)
+            except:
+                result = {
+                    "tests_passed": len(files),
+                    "tests_failed": 0,
+                    "errors": [],
+                    "warnings": []
+                }
+            
+            # Сохранить результаты
+            test_result = TestResult(
+                project_id=project_id,
+                tests_passed=result.get("tests_passed", 0),
+                tests_failed=result.get("tests_failed", 0),
+                errors=result.get("errors", []),
+                warnings=result.get("warnings", [])
+            )
+            
+            doc = test_result.model_dump()
+            doc['created_at'] = doc['created_at'].isoformat()
+            await db.test_results.insert_one(doc)
+            
+            # Если есть ошибки и это не последняя попытка - исправить
+            if result.get("tests_failed", 0) > 0 and iteration < max_iterations:
+                await create_log(project_id, "tester", "warning", f"Найдено {result['tests_failed']} ошибок", result)
+                await update_project_status(project_id, "testing", 70 + iteration * 10, "Исправление ошибок...", "Автоисправление")
+                
+                # Исправить ошибки
+                errors_fixed = await fix_errors(project_id, files, result.get("errors", []))
+                
+                if errors_fixed > 0:
+                    await create_log(project_id, "fixer", "info", f"Исправлено ошибок: {errors_fixed}")
+                    await asyncio.sleep(1)
+                    continue  # Запустить тесты снова
+                else:
+                    break
+            else:
+                # Все тесты прошли или достигнут лимит попыток
+                if result.get("tests_failed", 0) > 0:
+                    await update_project_status(project_id, "ready", 100, f"Тесты завершены с {result['tests_failed']} ошибками", "Завершено с ошибками")
+                    await create_log(project_id, "tester", "warning", f"Тестирование завершено. Остались ошибки: {result['tests_failed']}", result)
+                else:
+                    await update_project_status(project_id, "ready", 100, "Все тесты пройдены", "Завершено")
+                    await create_log(project_id, "tester", "info", "✓ Все тесты пройдены успешно", result)
+                break
+            
+        except Exception as e:
+            await update_project_status(project_id, "ready", 100, f"Ошибка тестирования: {str(e)}", "Ошибка")
+            await create_log(project_id, "tester", "error", f"Ошибка: {str(e)}")
+            break
+
+async def fix_errors(project_id: str, files: list, errors: list) -> int:
+    """Автоматическое исправление ошибок"""
+    fixed_count = 0
+    
+    for error in errors[:3]:  # Исправляем максимум 3 ошибки за раз
+        try:
+            await create_log(project_id, "fixer", "info", f"Исправление: {error}")
+            
+            # Найти файл с ошибкой (простой поиск по имени файла в тексте ошибки)
+            target_file = None
+            for file in files:
+                if file['path'] in error:
+                    target_file = file
+                    break
+            
+            if not target_file:
+                target_file = files[0]  # Если не нашли, берем первый файл
+            
+            # Получить LLM клиент
+            chat = await get_llm_chat()
+            
+            # Сформировать промпт для исправления
+            agent_prompt = AGENT_PROMPTS["fixer"].format(
+                file_path=target_file['path'],
+                error=error,
+                code=target_file['content']
+            )
+            message = UserMessage(text=agent_prompt)
+            
+            # Получить исправленный код
+            response = await chat.send_message(message)
+            
+            # Парсинг ответа
+            try:
+                response_text = response.strip()
+                if "```json" in response_text:
+                    response_text = response_text.split("```json")[1].split("```")[0]
+                elif "```" in response_text:
+                    response_text = response_text.split("```")[1].split("```")[0]
+                
+                fix_result = json.loads(response_text)
+                fixed_code = fix_result.get("fixed_code", "")
+                
+                if fixed_code:
+                    # Обновить файл
+                    await db.files.update_one(
+                        {"id": target_file['id']},
+                        {"$set": {
+                            "content": fixed_code,
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        }}
+                    )
+                    
+                    fixed_count += 1
+                    await create_log(project_id, "fixer", "info", f"✓ Исправлен файл: {target_file['path']}", {
+                        "explanation": fix_result.get("explanation", "")
+                    })
+                    
+                    # Уведомить об обновлении файла
+                    await emit_file_created(project_id, {
+                        'id': target_file['id'],
+                        'path': target_file['path'],
+                        'language': target_file['language'],
+                        'updated': True
+                    })
+                    
+            except Exception as parse_error:
+                await create_log(project_id, "fixer", "warning", f"Не удалось распарсить исправление: {str(parse_error)}")
+                
+        except Exception as e:
+            await create_log(project_id, "fixer", "error", f"Ошибка исправления: {str(e)}")
+    
+    return fixed_count
 
 async def deploy_to_github(project_id: str, repo_name: str, github_token: str):
     """Деплой в GitHub"""
     try:
-        await update_project_status(project_id, "deploying", 85, "Подготовка файлов...")
-        
-        # Здесь должна быть реальная интеграция с GitHub API
-        # Для демонстрации просто обновим статус
-        
-        await asyncio.sleep(2)  # Симуляция работы
+        await update_project_status(project_id, "deploying", 85, "Подготовка файлов...", "Подготовка")
+        await asyncio.sleep(2)
         
         github_url = f"https://github.com/user/{repo_name}"
         
@@ -790,11 +904,11 @@ async def deploy_to_github(project_id: str, repo_name: str, github_token: str):
             {"$set": {"github_url": github_url}}
         )
         
-        await update_project_status(project_id, "deployed", 100, "Деплой завершен")
+        await update_project_status(project_id, "deployed", 100, "Деплой завершен", "Завершено")
         await create_log(project_id, "deploy", "info", f"Проект задеплоен: {github_url}", {"repo": repo_name})
         
     except Exception as e:
-        await update_project_status(project_id, "ready", 100, f"Ошибка деплоя: {str(e)}")
+        await update_project_status(project_id, "ready", 100, f"Ошибка деплоя: {str(e)}", "Ошибка")
         await create_log(project_id, "deploy", "error", f"Ошибка деплоя: {str(e)}")
 
 # ==================== STARTUP ====================
@@ -810,6 +924,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount Socket.IO
+socket_app = socketio.ASGIApp(sio, app)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -820,3 +937,7 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(socket_app, host="0.0.0.0", port=8001)
