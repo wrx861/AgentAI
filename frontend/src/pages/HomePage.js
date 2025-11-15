@@ -3,9 +3,9 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Card } from "@/components/ui/card";
 import { toast } from "sonner";
 import { 
-  Sparkles, 
   Menu, 
   Coins, 
   Gift, 
@@ -15,7 +15,10 @@ import {
   Paperclip,
   Settings,
   Mic,
-  ArrowRight
+  ArrowRight,
+  X,
+  CheckCircle2,
+  Loader2
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -23,10 +26,12 @@ const API = `${BACKEND_URL}/api`;
 
 export default function HomePage() {
   const [prompt, setPrompt] = useState("");
+  const [step, setStep] = useState("input"); // input, clarifying, confirmed
+  const [clarifications, setClarifications] = useState([]);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  const handleCreate = async (customPrompt) => {
+  const handleInitialSubmit = async (customPrompt) => {
     const finalPrompt = customPrompt || prompt;
     
     if (!finalPrompt.trim()) {
@@ -35,8 +40,43 @@ export default function HomePage() {
     }
 
     setLoading(true);
+    setStep("clarifying");
+    
     try {
-      const response = await axios.post(`${API}/projects`, { prompt: finalPrompt });
+      // Генерируем уточняющие вопросы
+      const mockClarifications = [
+        {
+          question: "Какой стек технологий предпочитаете?",
+          options: ["React + FastAPI + MongoDB", "Next.js + Node.js + PostgreSQL", "Vue + Django + MySQL"]
+        },
+        {
+          question: "Нужна ли аутентификация пользователей?",
+          options: ["Да, с JWT токенами", "Да, через OAuth (Google/GitHub)", "Нет, не требуется"]
+        },
+        {
+          question: "Какой дизайн предпочитаете?",
+          options: ["Минималистичный", "Современный с анимациями", "Классический"]
+        },
+        {
+          question: "Нужны ли дополнительные функции?",
+          options: ["Поиск и фильтры", "Экспорт данных", "Уведомления", "Ничего дополнительно"]
+        }
+      ];
+      
+      setClarifications(mockClarifications);
+    } catch (error) {
+      console.error(error);
+      toast.error("Ошибка обработки запроса");
+      setStep("input");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirmAndCreate = async () => {
+    setLoading(true);
+    try {
+      const response = await axios.post(`${API}/projects`, { prompt });
       toast.success("Проект создан! Генерация начата...");
       navigate(`/project/${response.data.id}`);
     } catch (error) {
@@ -47,19 +87,24 @@ export default function HomePage() {
     }
   };
 
+  const handleCancel = () => {
+    setStep("input");
+    setClarifications([]);
+  };
+
   const quickActions = [
     { 
-      icon: <Twitter className="w-5 h-5" />,
+      icon: <Twitter className="w-4 h-4 sm:w-5 sm:h-5" />,
       label: "Clone X",
       prompt: "Создай клон социальной сети X (Twitter) с постами, лайками и подписками"
     },
     { 
-      icon: <PiggyBank className="w-5 h-5 text-green-400" />,
+      icon: <PiggyBank className="w-4 h-4 sm:w-5 sm:h-5 text-green-400" />,
       label: "Budget Planner",
       prompt: "Создай приложение для управления личным бюджетом с категориями расходов и статистикой"
     },
     { 
-      icon: <CalendarCheck className="w-5 h-5 text-orange-400" />,
+      icon: <CalendarCheck className="w-4 h-4 sm:w-5 sm:h-5 text-orange-400" />,
       label: "Consult Plus",
       prompt: "Создай систему онлайн-консультаций с записью на приём и видеозвонками"
     }
@@ -77,177 +122,253 @@ export default function HomePage() {
       />
 
       {/* Top Bar */}
-      <header className="relative z-10 px-6 py-4 flex items-center justify-between">
+      <header className="relative z-10 px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between">
         <Button
           variant="ghost"
           size="icon"
-          className="text-gray-400 hover:text-white hover:bg-white/10"
+          className="text-gray-400 hover:text-white hover:bg-white/10 h-9 w-9 sm:h-10 sm:w-10"
           onClick={() => navigate('/dashboard')}
           data-testid="menu-btn"
         >
-          <Menu className="w-6 h-6" />
+          <Menu className="w-5 h-5 sm:w-6 sm:h-6" />
         </Button>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-yellow-500/10 border border-yellow-500/20">
-            <Coins className="w-4 h-4 text-yellow-400" />
-            <span className="text-sm font-medium text-yellow-400">98.92</span>
+        <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full bg-yellow-500/10 border border-yellow-500/20">
+            <Coins className="w-3 h-3 sm:w-4 sm:h-4 text-yellow-400" />
+            <span className="text-xs sm:text-sm font-medium text-yellow-400">98.92</span>
           </div>
           <Button
             variant="ghost"
             size="icon"
-            className="text-gray-400 hover:text-white hover:bg-white/10"
+            className="text-gray-400 hover:text-white hover:bg-white/10 h-9 w-9 sm:h-10 sm:w-10"
             onClick={() => navigate('/settings')}
             data-testid="settings-btn"
           >
-            <Gift className="w-6 h-6" />
+            <Gift className="w-5 h-5 sm:w-6 sm:h-6" />
           </Button>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="relative z-10 px-6 py-12 max-w-4xl mx-auto">
-        {/* Welcome Message */}
-        <div className="text-center mb-12">
-          <div 
-            className="text-xl mb-4 tracking-[0.3em] font-medium"
-            style={{
-              color: '#00ff88',
-              textShadow: '0 0 20px rgba(0, 255, 136, 0.5)',
-              fontFamily: 'monospace',
-              letterSpacing: '0.3em'
-            }}
-          >
-            WELCOME, USER
-          </div>
-          <h1 
-            className="text-5xl sm:text-6xl font-bold mb-8"
-            style={{
-              background: 'linear-gradient(135deg, #00d4ff 0%, #00ff88 100%)',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-              backgroundClip: 'text'
-            }}
-            data-testid="main-heading"
-          >
-            What will you build today?
-          </h1>
-        </div>
+      <main className="relative z-10 px-4 sm:px-6 py-6 sm:py-12 max-w-4xl mx-auto">
+        {step === "input" && (
+          <>
+            {/* Welcome Message */}
+            <div className="text-center mb-8 sm:mb-12">
+              <div 
+                className="text-sm sm:text-xl mb-3 sm:mb-4 tracking-[0.2em] sm:tracking-[0.3em] font-medium"
+                style={{
+                  color: '#00ff88',
+                  textShadow: '0 0 20px rgba(0, 255, 136, 0.5)',
+                  fontFamily: 'monospace',
+                }}
+              >
+                WELCOME, USER
+              </div>
+              <h1 
+                className="text-3xl sm:text-5xl lg:text-6xl font-bold mb-4 sm:mb-8 px-4"
+                style={{
+                  background: 'linear-gradient(135deg, #00d4ff 0%, #00ff88 100%)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text'
+                }}
+                data-testid="main-heading"
+              >
+                What will you build today?
+              </h1>
+            </div>
 
-        {/* Quick Actions */}
-        <div className="grid grid-cols-3 gap-3 mb-8">
-          {quickActions.map((action, idx) => (
-            <button
-              key={idx}
-              data-testid={`quick-action-${idx}`}
-              onClick={() => handleCreate(action.prompt)}
-              disabled={loading}
-              className="group relative px-4 py-6 rounded-2xl bg-white/5 border border-white/10 hover:border-cyan-500/50 hover:bg-white/10 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{
-                boxShadow: '0 4px 24px rgba(0, 212, 255, 0.05)'
-              }}
-            >
-              <div className="flex flex-col items-center gap-3">
-                <div 
-                  className="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500/20 to-purple-500/20 flex items-center justify-center group-hover:scale-110 transition-transform"
+            {/* Quick Actions */}
+            <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-6 sm:mb-8">
+              {quickActions.map((action, idx) => (
+                <button
+                  key={idx}
+                  data-testid={`quick-action-${idx}`}
+                  onClick={() => {
+                    setPrompt(action.prompt);
+                    handleInitialSubmit(action.prompt);
+                  }}
+                  disabled={loading}
+                  className="group relative px-2 sm:px-4 py-4 sm:py-6 rounded-xl sm:rounded-2xl bg-white/5 border border-white/10 hover:border-cyan-500/50 hover:bg-white/10 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
                   style={{
-                    boxShadow: '0 0 20px rgba(0, 212, 255, 0.2)'
+                    boxShadow: '0 4px 24px rgba(0, 212, 255, 0.05)'
                   }}
                 >
-                  {action.icon}
-                </div>
-                <span className="text-sm font-medium text-gray-300 group-hover:text-white transition-colors">
-                  {action.label}
-                </span>
-              </div>
-            </button>
-          ))}
-        </div>
-
-        {/* Main Input Area */}
-        <div className="relative mb-6">
-          <Textarea
-            data-testid="prompt-input"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Build me a dashboard for..."
-            disabled={loading}
-            className="min-h-[160px] bg-black/40 border-2 border-white/10 hover:border-cyan-500/30 focus:border-cyan-500/50 text-white placeholder:text-gray-500 resize-none text-lg p-6 rounded-3xl backdrop-blur-sm transition-all disabled:opacity-50"
-            style={{
-              boxShadow: '0 8px 32px rgba(0, 212, 255, 0.08)'
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                handleCreate(null);
-              }
-            }}
-          />
-        </div>
-
-        {/* Input Controls */}
-        <div className="flex items-center justify-between px-4">
-          <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="text-gray-400 hover:text-white hover:bg-white/10 rounded-xl"
-              data-testid="attach-btn"
-            >
-              <Paperclip className="w-5 h-5" />
-            </Button>
-            
-            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 border border-white/10">
-              <span className="text-sm font-medium text-cyan-400">E-1</span>
-              <span className="text-gray-500">▼</span>
+                  <div className="flex flex-col items-center gap-2 sm:gap-3">
+                    <div 
+                      className="w-8 h-8 sm:w-12 sm:h-12 rounded-lg sm:rounded-xl bg-gradient-to-br from-cyan-500/20 to-purple-500/20 flex items-center justify-center group-hover:scale-110 transition-transform"
+                      style={{
+                        boxShadow: '0 0 20px rgba(0, 212, 255, 0.2)'
+                      }}
+                    >
+                      {action.icon}
+                    </div>
+                    <span className="text-xs sm:text-sm font-medium text-gray-300 group-hover:text-white transition-colors text-center">
+                      {action.label}
+                    </span>
+                  </div>
+                </button>
+              ))}
             </div>
-            
-            <Button
-              variant="ghost"
-              size="icon"
-              className="text-gray-400 hover:text-white hover:bg-white/10 rounded-xl"
-              data-testid="settings-input-btn"
-            >
-              <Settings className="w-5 h-5" />
-            </Button>
-            
-            <Button
-              variant="ghost"
-              size="icon"
-              className="text-gray-400 hover:text-white hover:bg-white/10 rounded-xl"
-              data-testid="voice-btn"
-            >
-              <Mic className="w-5 h-5" />
-            </Button>
-          </div>
-          
-          <Button
-            onClick={() => handleCreate(null)}
-            disabled={loading || !prompt.trim()}
-            size="icon"
-            className="w-12 h-12 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-            style={{
-              boxShadow: '0 4px 24px rgba(0, 212, 255, 0.4)'
-            }}
-            data-testid="submit-btn"
-          >
-            {loading ? (
-              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            ) : (
-              <ArrowRight className="w-5 h-5" />
-            )}
-          </Button>
-        </div>
 
-        {/* Helper Text */}
-        <div className="text-center mt-8">
-          <p className="text-sm text-gray-500">
-            Нажмите <kbd className="px-2 py-1 rounded bg-white/5 border border-white/10 text-xs">Cmd/Ctrl + Enter</kbd> для быстрой отправки
-          </p>
-        </div>
+            {/* Main Input Area */}
+            <div className="relative mb-4 sm:mb-6">
+              <Textarea
+                data-testid="prompt-input"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Build me a dashboard for..."
+                disabled={loading}
+                className="min-h-[120px] sm:min-h-[160px] bg-black/40 border-2 border-white/10 hover:border-cyan-500/30 focus:border-cyan-500/50 text-white placeholder:text-gray-500 resize-none text-base sm:text-lg p-4 sm:p-6 rounded-2xl sm:rounded-3xl backdrop-blur-sm transition-all disabled:opacity-50"
+                style={{
+                  boxShadow: '0 8px 32px rgba(0, 212, 255, 0.08)'
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    handleInitialSubmit(null);
+                  }
+                }}
+              />
+            </div>
+
+            {/* Input Controls */}
+            <div className="flex items-center justify-between px-2 sm:px-4">
+              <div className="flex items-center gap-2 sm:gap-3">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-gray-400 hover:text-white hover:bg-white/10 rounded-xl h-8 w-8 sm:h-10 sm:w-10"
+                  data-testid="attach-btn"
+                >
+                  <Paperclip className="w-4 h-4 sm:w-5 sm:h-5" />
+                </Button>
+                
+                <div className="hidden sm:flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 border border-white/10">
+                  <span className="text-sm font-medium text-cyan-400">E-1</span>
+                  <span className="text-gray-500">▼</span>
+                </div>
+                
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-gray-400 hover:text-white hover:bg-white/10 rounded-xl h-8 w-8 sm:h-10 sm:w-10"
+                  data-testid="settings-input-btn"
+                >
+                  <Settings className="w-4 h-4 sm:w-5 sm:h-5" />
+                </Button>
+                
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-gray-400 hover:text-white hover:bg-white/10 rounded-xl h-8 w-8 sm:h-10 sm:w-10"
+                  data-testid="voice-btn"
+                >
+                  <Mic className="w-4 h-4 sm:w-5 sm:h-5" />
+                </Button>
+              </div>
+              
+              <Button
+                onClick={() => handleInitialSubmit(null)}
+                disabled={loading || !prompt.trim()}
+                size="icon"
+                className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                style={{
+                  boxShadow: '0 4px 24px rgba(0, 212, 255, 0.4)'
+                }}
+                data-testid="submit-btn"
+              >
+                {loading ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <ArrowRight className="w-5 h-5" />
+                )}
+              </Button>
+            </div>
+
+            {/* Helper Text */}
+            <div className="text-center mt-6 sm:mt-8">
+              <p className="text-xs sm:text-sm text-gray-500">
+                Нажмите <kbd className="px-2 py-1 rounded bg-white/5 border border-white/10 text-xs">Cmd/Ctrl + Enter</kbd> для быстрой отправки
+              </p>
+            </div>
+          </>
+        )}
+
+        {step === "clarifying" && (
+          <div className="fade-in">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl sm:text-2xl font-bold text-white">Уточнение деталей</h2>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleCancel}
+                className="text-gray-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </Button>
+            </div>
+
+            {/* Original Prompt */}
+            <Card className="glass-effect border-white/10 p-4 mb-6">
+              <p className="text-sm text-gray-400 mb-2">Ваш запрос:</p>
+              <p className="text-white">{prompt}</p>
+            </Card>
+
+            {/* Clarification Questions */}
+            <div className="space-y-4 mb-6">
+              {clarifications.map((item, idx) => (
+                <Card key={idx} className="glass-effect border-white/10 p-4">
+                  <p className="text-white font-medium mb-3">{item.question}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {item.options.map((option, optIdx) => (
+                      <button
+                        key={optIdx}
+                        className="px-4 py-3 rounded-lg bg-white/5 border border-white/10 hover:border-cyan-500/50 hover:bg-white/10 text-left text-sm text-gray-300 hover:text-white transition-all"
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                </Card>
+              ))}
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-col sm:flex-row gap-3">
+              <Button
+                onClick={handleCancel}
+                variant="outline"
+                className="flex-1 border-white/20 hover:bg-white/10"
+              >
+                Отмена
+              </Button>
+              <Button
+                onClick={handleConfirmAndCreate}
+                disabled={loading}
+                className="flex-1 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Создание...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                    Подтвердить и создать
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
       </main>
 
       {/* Decorative Glows */}
-      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-cyan-500/10 rounded-full blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute top-1/4 left-1/4 w-64 h-64 sm:w-96 sm:h-96 bg-cyan-500/10 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-1/4 right-1/4 w-64 h-64 sm:w-96 sm:h-96 bg-purple-500/10 rounded-full blur-[120px] pointer-events-none" />
     </div>
   );
 }
