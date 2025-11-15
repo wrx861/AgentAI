@@ -3,7 +3,7 @@ import "@/App.css";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import HomePage from "@/pages/HomePage";
 import DashboardPage from "@/pages/DashboardPage";
-import ProjectPage from "@/pages/ProjectPage";
+import ProjectDetailPage from "@/pages/ProjectDetailPage";
 import SettingsPage from "@/pages/SettingsPage";
 import { Toaster } from "sonner";
 
@@ -14,7 +14,7 @@ function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/project/:id" element={<ProjectPage />} />
+          <Route path="/project/:id" element={<ProjectDetailPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </BrowserRouter>
